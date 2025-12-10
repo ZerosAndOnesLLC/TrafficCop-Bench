@@ -1,0 +1,82 @@
+# Full configuration example for TrafficCop Bench
+# This shows all available options
+
+name: "comprehensive-load-test"
+target: "http://localhost:8080/api/v1"
+
+# Test duration OR request count (one required)
+duration: "5m"
+# requests: 100000
+
+# Concurrency settings
+concurrency: 100
+rate: 10000  # Target 10k req/s, 0 = unlimited
+
+# Warm-up before measurement
+warmup: "30s"
+
+# Request timeout
+timeout: "30s"
+
+# HTTP-specific configuration
+http:
+  method: "POST"
+  headers:
+    Authorization: "Bearer your-token-here"
+    Content-Type: "application/json"
+    Accept: "application/json"
+    X-Request-ID: "load-test"
+  body: '{"action":"benchmark","timestamp":"2024-01-01T00:00:00Z"}'
+  # body_file: "/path/to/request.json"  # Alternative to inline body
+  content_type: "application/json"
+  keep_alive: true
+  http2: true
+  insecure: false
+  expected_status: [200, 201, 202, 204]
+
+  # Multi-endpoint testing (optional)
+  # endpoints:
+  #   - path: "/users"
+  #     method: "GET"
+  #     weight: 5
+  #   - path: "/users"
+  #     method: "POST"
+  #     body: '{"name":"test"}'
+  #     weight: 2
+  #   - path: "/health"
+  #     weight: 1
+
+# WebSocket-specific configuration (when testing ws:// URLs)
+websocket:
+  messages_per_connection: 10
+  message: "ping"
+  # message_size: 256  # Used if message not set
+  # message_delay: "100ms"
+  protocols: []
+  headers: {}
+
+# gRPC-specific configuration (when testing grpc:// URLs)
+grpc:
+  service: "grpc.health.v1.Health"
+  method: "Check"
+  request: "{}"
+  metadata: {}
+  tls: false
+  plaintext: true
+
+# TCP-specific configuration (when testing tcp:// URLs)
+tcp:
+  send_data: "PING\r\n"
+  # send_hex: "48454c4c4f"  # Alternative hex format
+  expect: "PONG"
+  read_size: 4096
+  tls: false
+  insecure: false
+
+# Output configuration
+output:
+  format: "text"  # text, json, or csv
+  # file: "results.json"
+  progress: true
+  progress_interval: "1s"
+  # histogram_file: "latency-histogram.hdr"

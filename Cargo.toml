@@ -1,0 +1,79 @@
+[package]
+name = "trafficcop-bench"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance load testing tool for TrafficCop reverse proxy"
+license = "MIT"
+authors = ["Mack"]
+readme = "README.md"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "rustls-tls"], default-features = false }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+
+# gRPC
+tonic = { version = "0.12", features = ["tls", "channel"] }
+prost = "0.13"
+
+# TCP
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+hex = "0.4"
+
+# Metrics and histograms
+hdrhistogram = "7"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Terminal UI
+crossterm = "0.28"
+ratatui = "0.29"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Random data generation
+rand = "0.8"
+
+# URL parsing
+url = "2"
+
+# HTTP types
+http = "1"
+
+# Byte handling
+bytes = "1"
+
+# Async utilities
+async-trait = "0.1"
+
+# UUID for request IDs
+uuid = { version = "1", features = ["v4"] }
+
+# CSV export
+csv = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

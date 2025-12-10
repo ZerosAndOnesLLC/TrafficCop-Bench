@@ -1,0 +1,22 @@
+# Example HTTP load test configuration for TrafficCop
+
+name: "trafficcop-http-test"
+target: "http://localhost:8080"
+duration: "30s"
+concurrency: 50
+rate: 0  # 0 = unlimited
+
+http:
+  method: "GET"
+  headers:
+    Accept: "application/json"
+    User-Agent: "trafficcop-bench/1.0"
+  http2: true
+  keep_alive: true
+  insecure: false
+  expected_status: [200, 201, 204]
+
+output:
+  format: "text"
+  progress: true
+  progress_interval: "1s"
