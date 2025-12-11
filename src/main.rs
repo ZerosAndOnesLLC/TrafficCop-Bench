@@ -1,9 +1,11 @@
+mod backend;
 mod config;
 mod display;
 mod grpc;
 mod http;
 mod metrics;
 mod report;
+mod resources;
 mod tcp;
 mod websocket;
 
@@ -50,6 +52,9 @@ enum Commands {
 
     /// Compare two test result files
     Compare(CompareArgs),
+
+    /// Run integrated benchmark with embedded backend and TrafficCop
+    Bench(BenchArgs),
 }
 
 #[derive(Parser)]
@@ -350,6 +355,61 @@ struct CompareArgs {
     current: String,
 }
 
+#[derive(Parser)]
+struct BenchArgs {
+    /// Path to TrafficCop binary
+    #[arg(long, required = true)]
+    trafficcop: String,
+
+    /// Path to TrafficCop config file
+    #[arg(long, required = true)]
+    config: String,
+
+    /// Backend server port
+    #[arg(long, default_value = "9000")]
+    backend_port: u16,
+
+    /// Number of concurrent connections
+    #[arg(short, long, default_value = "100")]
+    concurrency: u32,
+
+    /// Test duration (e.g., "30s", "5m", "1h")
+    #[arg(short, long, default_value = "30s")]
+    duration: String,
+
+    /// Target requests per second (0 = unlimited)
+    #[arg(short, long, default_value = "0")]
+    rate: u64,
+
+    /// Warm-up duration before collecting metrics
+    #[arg(long, default_value = "5s")]
+    warmup: String,
+
+    /// Output format
+    #[arg(short, long, default_value = "text")]
+    output: OutputFormatArg,
+
+    /// Output file path
+    #[arg(long)]
+    output_file: Option<String>,
+
+    /// Disable real-time progress display
+    #[arg(long)]
+    no_progress: bool,
+
+    /// Use simple progress output instead of TUI
+    #[arg(long)]
+    simple_progress: bool,
+
+    /// Test name for reports
+    #[arg(long, default_value = "trafficcop-benchmark")]
+    name: String,
+
+    /// TrafficCop proxy address
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    proxy_addr: String,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum OutputFormatArg {
     Text,
@@ -375,7 +435,7 @@ fn parse_header(s: &str) -> Result<(String, String), String> {
     Ok((parts[0].trim().to_string(), parts[1].trim().to_string()))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     tracing_subscriber::registry()
@@ -392,6 +452,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Tcp(args) => run_tcp_test(args).await,
         Commands::Run(args) => run_from_config(args).await,
         Commands::Compare(args) => compare_results(args),
+        Commands::Bench(args) => run_integrated_bench(args).await,
     }
 }
 
@@ -930,6 +991,225 @@ fn compare_results(args: CompareArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     let comparison = report::compare_reports(&baseline, &current);
     comparison.print();
+
+    Ok(())
+}
+
+async fn run_integrated_bench(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use backend::{BackendConfig, BackendServer};
+    use resources::ResourceMonitor;
+    use std::process::{Command, Stdio};
+    use tokio::time::sleep;
+
+    let duration = parse_duration(&args.duration)?;
+    let warmup = parse_duration(&args.warmup)?;
+
+    // Step 1: Start the in-memory backend server
+    info!("Starting in-memory backend server on port {}...", args.backend_port);
+    let backend_config = BackendConfig {
+        addr: format!("127.0.0.1:{}", args.backend_port).parse()?,
+        ..Default::default()
+    };
+    let _backend = BackendServer::start(backend_config).await?;
+    info!("Backend server started");
+
+    // Step 2: Start TrafficCop as a child process
+    info!("Starting TrafficCop...");
+    info!("  Binary: {}", args.trafficcop);
+    info!("  Config: {}", args.config);
+
+    let mut trafficcop_child = Command::new(&args.trafficcop)
+        .args(["-c", &args.config])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start TrafficCop: {}. Is the path correct?", e))?;
+
+    let trafficcop_pid = trafficcop_child.id();
+
+    // Wait for TrafficCop to be ready
+    info!("Waiting for TrafficCop to be ready...");
+    let proxy_url = format!("http://{}/", args.proxy_addr);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()?;
+
+    for i in 1..=20 {
+        match client.get(&proxy_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                info!("TrafficCop ready after {} attempts", i);
+                break;
+            }
+            _ => {
+                if i == 20 {
+                    trafficcop_child.kill().ok();
+                    return Err("TrafficCop failed to become ready after 20 attempts".into());
+                }
+                sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+
+    // Start resource monitors
+    let trafficcop_monitor = ResourceMonitor::new(trafficcop_pid);
+    let bench_monitor = ResourceMonitor::new(std::process::id());
+    trafficcop_monitor.start(Duration::from_millis(200));
+    bench_monitor.start(Duration::from_millis(200));
+
+    // Parse TrafficCop config to count routers and services
+    let (router_count, service_count) = if let Ok(config_content) = std::fs::read_to_string(&args.config) {
+        if let Ok(config_yaml) = serde_yaml::from_str::<serde_yaml::Value>(&config_content) {
+            let routers = config_yaml.get("http")
+                .and_then(|h| h.get("routers"))
+                .and_then(|r| r.as_mapping())
+                .map(|m| m.len() as u64)
+                .unwrap_or(0);
+            let services = config_yaml.get("http")
+                .and_then(|h| h.get("services"))
+                .and_then(|s| s.as_mapping())
+                .map(|m| m.len() as u64)
+                .unwrap_or(0);
+            (routers, services)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    // Step 3: Run the benchmark
+    println!();
+    info!("========================================");
+    info!("Starting Benchmark");
+    info!("========================================");
+    info!("Target:      {}", proxy_url);
+    info!("Concurrency: {}", args.concurrency);
+    info!("Duration:    {}", args.duration);
+    info!("Warmup:      {}", args.warmup);
+    if router_count > 0 || service_count > 0 {
+        info!("Routers:     {}", router_count);
+        info!("Services:    {}", service_count);
+    }
+    println!();
+
+    let config = BenchConfig {
+        name: args.name.clone(),
+        target: proxy_url.clone(),
+        duration: Some(duration),
+        concurrency: args.concurrency,
+        rate: args.rate,
+        warmup: Some(warmup),
+        timeout: Duration::from_secs(30),
+        ..Default::default()
+    };
+
+    let metrics = new_shared_metrics(&args.name);
+    let started_at = Utc::now();
+
+    let tester = http::HttpTester::new(config.clone(), Arc::clone(&metrics))?;
+
+    // Run test with progress display
+    if !args.no_progress {
+        if args.simple_progress {
+            let progress = SimpleProgress::new(Arc::clone(&metrics), Duration::from_secs(1));
+            let progress_flag = progress.running_flag();
+
+            let test_handle = tokio::spawn({
+                let tester = tester.clone();
+                async move { tester.run().await }
+            });
+
+            let progress_handle = tokio::spawn(async move { progress.run().await });
+
+            let result = test_handle.await?;
+            progress_flag.store(false, Ordering::SeqCst);
+            let _ = progress_handle.await;
+
+            result?;
+        } else {
+            let mut display = StatsDisplay::new(
+                Arc::clone(&metrics),
+                &args.name,
+                &proxy_url,
+                args.concurrency,
+                config.duration,
+            )?;
+            let display_flag = display.running_flag();
+
+            let test_handle = tokio::spawn({
+                let tester = tester.clone();
+                let flag = Arc::clone(&display_flag);
+                async move {
+                    let result = tester.run().await;
+                    flag.store(false, Ordering::SeqCst);
+                    result
+                }
+            });
+
+            display.run(Duration::from_millis(100)).await?;
+            test_handle.await??;
+        }
+    } else {
+        tester.run().await?;
+    }
+
+    // Stop resource monitors and get stats
+    trafficcop_monitor.stop();
+    bench_monitor.stop();
+
+    // Small delay to collect final samples
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let trafficcop_stats = trafficcop_monitor.stats().await;
+    let bench_stats = bench_monitor.stats().await;
+
+    // Cleanup: kill TrafficCop
+    info!("Stopping TrafficCop...");
+    trafficcop_child.kill().ok();
+
+    // Generate report
+    let snapshot = metrics.full_snapshot().await;
+    let report = TestReport::from_snapshot(
+        snapshot,
+        &proxy_url,
+        "HTTP",
+        args.concurrency,
+        if args.rate > 0 { Some(args.rate) } else { None },
+        started_at,
+    );
+
+    output_report(&report, args.output.into(), args.output_file.as_deref())?;
+
+    // Print resource usage
+    println!();
+    println!("───────────────────────────────────────────────────────────────────────────────");
+    println!("                           RESOURCE USAGE");
+    println!("───────────────────────────────────────────────────────────────────────────────");
+    println!();
+    println!("TrafficCop (PID {}):", trafficcop_pid);
+    println!("  CPU:    avg {:.1}%  min {:.1}%  max {:.1}%",
+        trafficcop_stats.cpu_avg, trafficcop_stats.cpu_min, trafficcop_stats.cpu_max);
+    println!("  Memory: avg {:.1} MB  min {:.1} MB  max {:.1} MB",
+        trafficcop_stats.memory_avg_mb, trafficcop_stats.memory_min_mb, trafficcop_stats.memory_max_mb);
+    println!();
+    println!("Benchmark Tool (PID {}):", std::process::id());
+    println!("  CPU:    avg {:.1}%  min {:.1}%  max {:.1}%",
+        bench_stats.cpu_avg, bench_stats.cpu_min, bench_stats.cpu_max);
+    println!("  Memory: avg {:.1} MB  min {:.1} MB  max {:.1} MB",
+        bench_stats.memory_avg_mb, bench_stats.memory_min_mb, bench_stats.memory_max_mb);
+
+    if router_count > 0 || service_count > 0 {
+        println!();
+        println!("───────────────────────────────────────────────────────────────────────────────");
+        println!("                         TRAFFICCOP CONFIG");
+        println!("───────────────────────────────────────────────────────────────────────────────");
+        println!("Routers:      {}", router_count);
+        println!("Services:     {}", service_count);
+    }
+    println!();
+    println!("═══════════════════════════════════════════════════════════════════════════════");
+
+    info!("Benchmark complete!");
 
     Ok(())
 }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::metrics::{MetricsSnapshot, SharedMetrics};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},

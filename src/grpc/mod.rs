@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::config::BenchConfig;
 use crate::metrics::SharedMetrics;
 use bytes::{Buf, BufMut, Bytes};
@@ -174,10 +176,12 @@ impl GrpcTester {
         Ok(channel)
     }
 
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }

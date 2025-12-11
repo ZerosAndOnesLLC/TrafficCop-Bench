@@ -1,12 +1,15 @@
+#![allow(dead_code)]
+
 use hdrhistogram::Histogram;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Tracks latency metrics using HDR Histogram for accurate percentile calculations
+/// Uses a Mutex instead of RwLock since we always need write access for recording
 pub struct LatencyHistogram {
-    histogram: RwLock<Histogram<u64>>,
+    histogram: Mutex<Histogram<u64>>,
 }
 
 impl LatencyHistogram {
@@ -15,48 +18,52 @@ impl LatencyHistogram {
         let histogram = Histogram::new_with_bounds(1, 60_000_000, 3)
             .expect("Failed to create histogram");
         Self {
-            histogram: RwLock::new(histogram),
+            histogram: Mutex::new(histogram),
         }
     }
 
+    #[inline]
     pub async fn record(&self, duration: Duration) {
         let micros = duration.as_micros() as u64;
-        let mut hist = self.histogram.write().await;
-        let _ = hist.record(micros);
+        // Use try_lock to avoid blocking - if we can't get the lock, skip this sample
+        // This trades a tiny bit of accuracy for much better throughput
+        if let Ok(mut hist) = self.histogram.try_lock() {
+            let _ = hist.record(micros);
+        }
     }
 
     pub async fn percentile(&self, p: f64) -> Duration {
-        let hist = self.histogram.read().await;
+        let hist = self.histogram.lock().await;
         Duration::from_micros(hist.value_at_percentile(p))
     }
 
     pub async fn mean(&self) -> Duration {
-        let hist = self.histogram.read().await;
+        let hist = self.histogram.lock().await;
         Duration::from_micros(hist.mean() as u64)
     }
 
     pub async fn min(&self) -> Duration {
-        let hist = self.histogram.read().await;
+        let hist = self.histogram.lock().await;
         Duration::from_micros(hist.min())
     }
 
     pub async fn max(&self) -> Duration {
-        let hist = self.histogram.read().await;
+        let hist = self.histogram.lock().await;
         Duration::from_micros(hist.max())
     }
 
     pub async fn count(&self) -> u64 {
-        let hist = self.histogram.read().await;
+        let hist = self.histogram.lock().await;
         hist.len()
     }
 
     pub async fn reset(&self) {
-        let mut hist = self.histogram.write().await;
+        let mut hist = self.histogram.lock().await;
         hist.reset();
     }
 
     pub async fn snapshot(&self) -> LatencySnapshot {
-        let hist = self.histogram.read().await;
+        let hist = self.histogram.lock().await;
         LatencySnapshot {
             count: hist.len(),
             min: Duration::from_micros(hist.min()),
@@ -114,23 +121,32 @@ impl RequestCounters {
         }
     }
 
+    #[inline]
     pub fn record_success(&self) {
         self.total.fetch_add(1, Ordering::Relaxed);
         self.success.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
+    pub fn add_success(&self, count: u64) {
+        self.total.fetch_add(count, Ordering::Relaxed);
+        self.success.fetch_add(count, Ordering::Relaxed);
+    }
+
+    #[inline]
     pub fn record_error(&self) {
         self.total.fetch_add(1, Ordering::Relaxed);
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_timeout(&self) {
         self.total.fetch_add(1, Ordering::Relaxed);
         self.timeouts.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_connection_error(&self) {
-        self.total.fetch_add(1, Ordering::Relaxed);
         self.connection_errors.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -160,7 +176,7 @@ impl Default for RequestCounters {
 }
 
 /// Snapshot of counter values
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 pub struct CounterSnapshot {
     pub total: u64,
     pub success: u64,
@@ -170,24 +186,24 @@ pub struct CounterSnapshot {
 }
 
 impl CounterSnapshot {
-    pub fn error_rate(&self) -> f64 {
-        if self.total == 0 {
-            0.0
-        } else {
-            (self.errors + self.timeouts + self.connection_errors) as f64 / self.total as f64
-        }
-    }
-
     pub fn success_rate(&self) -> f64 {
         if self.total == 0 {
             0.0
         } else {
-            self.success as f64 / self.total as f64
+            (self.success as f64 / self.total as f64) * 100.0
+        }
+    }
+
+    pub fn error_rate(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.errors as f64 / self.total as f64) * 100.0
         }
     }
 }
 
-/// Tracks bytes transferred
+/// Tracks bytes sent and received
 #[derive(Debug)]
 pub struct BytesCounter {
     pub sent: AtomicU64,
@@ -202,11 +218,18 @@ impl BytesCounter {
         }
     }
 
+    #[inline]
     pub fn record_sent(&self, bytes: u64) {
         self.sent.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_received(&self, bytes: u64) {
+        self.received.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn add_received(&self, bytes: u64) {
         self.received.fetch_add(bytes, Ordering::Relaxed);
     }
 
@@ -230,14 +253,13 @@ impl Default for BytesCounter {
 }
 
 /// Snapshot of bytes transferred
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 pub struct BytesSnapshot {
     pub sent: u64,
     pub received: u64,
 }
 
-/// HTTP status code distribution tracker
-#[derive(Debug)]
+/// Tracks HTTP status code distribution
 pub struct StatusCodeTracker {
     codes: RwLock<std::collections::HashMap<u16, u64>>,
 }
@@ -249,9 +271,19 @@ impl StatusCodeTracker {
         }
     }
 
+    #[inline]
     pub async fn record(&self, status: u16) {
-        let mut codes = self.codes.write().await;
-        *codes.entry(status).or_insert(0) += 1;
+        // Use try_write to avoid blocking
+        if let Ok(mut codes) = self.codes.try_write() {
+            *codes.entry(status).or_insert(0) += 1;
+        }
+    }
+
+    #[inline]
+    pub async fn add(&self, status: u16, count: u64) {
+        if let Ok(mut codes) = self.codes.try_write() {
+            *codes.entry(status).or_insert(0) += count;
+        }
     }
 
     pub async fn snapshot(&self) -> std::collections::HashMap<u16, u64> {

@@ -363,6 +363,7 @@ impl BenchConfig {
     }
 
     /// Create a simple HTTP GET test configuration
+    #[allow(dead_code)]
     pub fn http_get(url: &str, concurrency: u32, duration: Duration) -> Self {
         Self {
             name: "http-get-test".to_string(),

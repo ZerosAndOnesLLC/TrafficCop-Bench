@@ -150,10 +150,12 @@ impl WebSocketTester {
         Ok(url)
     }
 
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
@@ -281,8 +283,6 @@ pub enum WebSocketError {
     InvalidUrl(String),
     Connection(String),
     Timeout,
-    Send(String),
-    Receive(String),
 }
 
 impl std::fmt::Display for WebSocketError {
@@ -291,8 +291,6 @@ impl std::fmt::Display for WebSocketError {
             WebSocketError::InvalidUrl(e) => write!(f, "Invalid WebSocket URL: {}", e),
             WebSocketError::Connection(e) => write!(f, "WebSocket connection error: {}", e),
             WebSocketError::Timeout => write!(f, "WebSocket timeout"),
-            WebSocketError::Send(e) => write!(f, "WebSocket send error: {}", e),
-            WebSocketError::Receive(e) => write!(f, "WebSocket receive error: {}", e),
         }
     }
 }

@@ -2,8 +2,6 @@ use crate::metrics::MetricsSnapshot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Write;
-use std::path::Path;
 use std::time::Duration;
 
 /// Test result report
@@ -105,12 +103,6 @@ impl TestReport {
         serde_json::to_string_pretty(self).map_err(|e| ReportError::Serialization(e.to_string()))
     }
 
-    /// Export report to JSON file
-    pub fn to_json_file(&self, path: impl AsRef<Path>) -> Result<(), ReportError> {
-        let json = self.to_json()?;
-        std::fs::write(path, json).map_err(|e| ReportError::Io(e.to_string()))
-    }
-
     /// Export report to CSV
     pub fn to_csv(&self) -> Result<String, ReportError> {
         let mut writer = csv::Writer::from_writer(vec![]);
@@ -174,12 +166,6 @@ impl TestReport {
             .into_inner()
             .map_err(|e| ReportError::Csv(e.to_string()))?;
         String::from_utf8(data).map_err(|e| ReportError::Csv(e.to_string()))
-    }
-
-    /// Export report to CSV file
-    pub fn to_csv_file(&self, path: impl AsRef<Path>) -> Result<(), ReportError> {
-        let csv = self.to_csv()?;
-        std::fs::write(path, csv).map_err(|e| ReportError::Io(e.to_string()))
     }
 
     /// Print report to console
@@ -315,12 +301,6 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Report writer for streaming results
-pub struct ReportWriter {
-    output: Box<dyn Write + Send>,
-    format: OutputFormat,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
     Text,
@@ -328,45 +308,9 @@ pub enum OutputFormat {
     Csv,
 }
 
-impl ReportWriter {
-    pub fn stdout(format: OutputFormat) -> Self {
-        Self {
-            output: Box::new(std::io::stdout()),
-            format,
-        }
-    }
-
-    pub fn file(path: impl AsRef<Path>, format: OutputFormat) -> Result<Self, ReportError> {
-        let file =
-            std::fs::File::create(path).map_err(|e| ReportError::Io(e.to_string()))?;
-        Ok(Self {
-            output: Box::new(file),
-            format,
-        })
-    }
-
-    pub fn write_report(&mut self, report: &TestReport) -> Result<(), ReportError> {
-        match self.format {
-            OutputFormat::Text => {
-                report.print_text();
-                Ok(())
-            }
-            OutputFormat::Json => {
-                let json = report.to_json()?;
-                writeln!(self.output, "{}", json).map_err(|e| ReportError::Io(e.to_string()))
-            }
-            OutputFormat::Csv => {
-                let csv = report.to_csv()?;
-                writeln!(self.output, "{}", csv).map_err(|e| ReportError::Io(e.to_string()))
-            }
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum ReportError {
     Serialization(String),
-    Io(String),
     Csv(String),
 }
 
@@ -374,7 +318,6 @@ impl std::fmt::Display for ReportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReportError::Serialization(e) => write!(f, "Serialization error: {}", e),
-            ReportError::Io(e) => write!(f, "IO error: {}", e),
             ReportError::Csv(e) => write!(f, "CSV error: {}", e),
         }
     }

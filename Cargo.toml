@@ -1,6 +1,6 @@
 [package]
 name = "trafficcop-bench"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "High-performance load testing tool for TrafficCop reverse proxy"
 license = "MIT"
@@ -13,6 +13,14 @@ tokio = { version = "1", features = ["full"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "gzip", "brotli", "rustls-tls"], default-features = false }
+
+# HTTP server (for embedded backend)
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "http2"] }
+http-body-util = "0.1"
+
+# Socket options for SO_REUSEPORT
+socket2 = { version = "0.5", features = ["all"] }
 
 # WebSocket client
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -70,6 +78,9 @@ uuid = { version = "1", features = ["v4"] }
 # CSV export
 csv = "1"
 
+# System resource monitoring
+sysinfo = "0.32"
+
 [build-dependencies]
 tonic-build = "0.12"
 
@@ -77,3 +88,6 @@ tonic-build = "0.12"
 lto = true
 codegen-units = 1
 opt-level = 3
+
+[dev-dependencies]
+tempfile = "3.23.0"

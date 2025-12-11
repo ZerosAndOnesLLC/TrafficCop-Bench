@@ -1,0 +1,23 @@
+# TrafficCop config for local benchmarking
+# Uses a simple local backend for accurate performance testing
+
+entryPoints:
+  web:
+    address: "127.0.0.1:8080"
+
+api:
+  insecure: true
+  dashboard: false
+
+http:
+  routers:
+    bench-router:
+      rule: "PathPrefix(`/`)"
+      service: backend
+      priority: 1
+
+  services:
+    backend:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:9000"
